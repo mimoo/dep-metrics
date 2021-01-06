@@ -4,33 +4,76 @@ import sys
 from packaging import version
 import semver
 from datetime import datetime
+from collections import defaultdict
+import hashlib
+import os
 
-API = "https://crates.io/api/v1/crates"
-
+#
+# Crates.io
+#
 
 # obtain crate info
+
+
 def get_crate_info(crate: str) -> dict:
-    r = requests.get(API + "/" + crate)
+    # check if cache exists
+    if os.path.exists("cache/" + crate):
+        f = open("cache/" + crate, "r")
+        return json.load(f)
+
+    r = requests.get("https://crates.io/api/v1/crates/" + crate)
     if r.status_code != 200:
         print("couldn't query crates.io")
         return
-    return r.json()
+    res = r.json()
+
+    # cache result
+    w = open("cache/" + crate, "w")
+    json.dump(res, w)
+
+    #
+    return res
 
 
-# get number of versions between two semvers
-def versions_between(info: dict, old_version: str, new_version: str) -> int:
+def extract_from_info(info: dict) -> list:
+    # get sorted list of ("semver", "date") tuples
     versions = []
     for v in info["versions"]:
-        versions.append(v["num"])
-    versions = sorted(versions, key=lambda x: version.Version(x))
+        # there can be some invalid "yank" and "tmp" versions
+        try:
+            version.Version(v["num"])
+        except:
+            continue
 
-    return versions.index(new_version) - versions.index(old_version)
+        versions.append({
+            "version": v["num"],
+            "date": v["created_at"],
+        })
+
+    # sort by version (we could sort by date also)
+    versions = sorted(versions, key=lambda x: version.Version(x["version"]))
+
+    return versions
 
 
-# get type of version change between two semvers
-def what_kind_of_update(old_version: str, new_version: str) -> str:
-    old = semver.VersionInfo.parse(old_version)
-    new = semver.VersionInfo.parse(new_version)
+#
+# Metrics
+#
+
+# get number of versions between two semvers
+def get_versions_landed(dep: dict) -> int:
+    versions = [d["version"] for d in dep["all_versions"]]
+    return versions.index(dep["new_version"]) - versions.index(dep["old_version"])
+
+
+def get_semver_type_update(dep: dict) -> str:
+    return what_kind_of_update(dep["old_version"], dep["new_version"])
+
+
+def what_kind_of_update(old: str, new: str) -> str:
+    old = semver.VersionInfo.parse(old)
+    new = semver.VersionInfo.parse(new)
+
     if old.major != new.major:
         return "MAJOR"
     elif old.minor != new.minor:
@@ -45,48 +88,58 @@ def what_kind_of_update(old_version: str, new_version: str) -> str:
     return "UNKNOWN"
 
 
-def versions_in_daterange(info: dict, start_date, end_date) -> int:
+def get_versions_observed(dep: dict, start_date, end_date) -> int:
     versions = 0
-    for v in info["versions"]:
+    for v in dep["all_versions"]:
         # if in date range, add it
-        date = datetime.strptime(v["created_at"], '%Y-%m-%dT%H:%M:%S.%f%z')
+        date = datetime.strptime(v["date"], '%Y-%m-%dT%H:%M:%S.%f%z')
         if date >= start_date and date <= end_date:
             versions += 1
 
     return versions
 
 
-def old_new_versions_in_daterange(info: dict, start_date, end_date):
+def get_semver_type_update_period(dep: dict, start_date, end_date) -> str:
     start_version = None
     start_version_date = None
 
     end_version = None
     end_version_date = None
 
-    for v in info["versions"]:
+    for v in dep["all_versions"]:
         # if in date range, add it
-        date = datetime.strptime(v["created_at"], '%Y-%m-%dT%H:%M:%S.%f%z')
+        date = datetime.strptime(v["date"], '%Y-%m-%dT%H:%M:%S.%f%z')
         if date >= start_date and date <= end_date:
             if start_version is None:
-                start_version = v["num"]
-                end_version = v["num"]
+                start_version = v["version"]
+                end_version = v["version"]
                 start_version_date = date
                 end_version_date = date
             elif date < start_version_date:
-                start_version = v["num"]
+                start_version = v["version"]
                 start_version_date = date
             elif date > end_version_date:
-                end_version = v["num"]
+                end_version = v["version"]
                 end_version_date = date
 
-    return start_version, end_version
+    if start_version is None or end_version is None or start_version == end_version:
+        return None
+
+    return what_kind_of_update(start_version, end_version)
 
 
 def main():
-    # print usage
+    #
+    # 1. print usage
+    #
+
     if len(sys.argv) < 2:
         print("./metrics.py <GUPPY_JSON_OUTPUT>")
         return
+
+    #
+    # 2. retrieve arguments from files or stdin
+    #
 
     # open datetime files to get period [start_date,end_date]
     f1 = open("release1.datetime", "r")
@@ -95,10 +148,18 @@ def main():
     f2 = open("release2.datetime", "r")
     end_date = datetime.strptime(f2.read().strip(), '%Y-%m-%d %H:%M:%S %z')
 
+    # open
+    f3 = open("release1_deps", "r")
+    all_deps_file = f3.readlines()
+
     # open guppy output (dep diff within the period)
     guppy_output_file = sys.argv[1]
-    guppy_output = open(guppy_output_file, "r")
-    guppy = json.loads(guppy_output.read())
+    guppy_output = open(guppy_output_file, "r").read()
+    guppy = json.loads(guppy_output)
+
+    #
+    # 3. filter guppy diff output
+    #
 
     # get runtime deps that have changed
     changed = []
@@ -109,18 +170,32 @@ def main():
     if "host-packages" in guppy and "changed" in guppy["host-packages"]:
         changed += guppy["host-packages"]["changed"]
 
-    # init
-    versions_updated = 0
-    semver_versions_updated = {}
-    dep_to_changes = {}
-
-    dep_to_actual_changes = {}
-    actual_changes = 0
-    actual_semver_versions_updated = {}
-
     # TODO: how many dep introduced?
 
-    # fill
+    #
+    # 4. filter guppy output
+    #
+
+    all_deps = {}
+    for to_parse in all_deps_file:
+        parsed = to_parse.split(" ")
+        name = parsed[0]
+        versionn = parsed[1]
+        registry = parsed[2]
+
+        if registry.strip() != "(registry+https://github.com/rust-lang/crates.io-index)":
+            continue
+
+        all_deps[name] = {
+            "version": versionn,
+        }
+
+    #
+    # 5. filter and get info from crates.io
+    #
+
+    deps = {}
+    print("obtaining info from crates.io...")
     for dep in changed:
         # filter
         if "workspace-path" in dep:
@@ -135,69 +210,89 @@ def main():
         if "crates-io" not in dep or dep["crates-io"] != True:
             continue
 
-        # debug
-        if dep["name"] == "rand":
-            print(dep)
+        # create deps entry from crates.io info
+        name = dep["name"]
 
-        # get all versions for that dependency
-        info = get_crate_info(dep["name"])
+        if name not in deps:
+            # get info from crates.io
+            info = get_crate_info(name)
 
-        # get number of version updates that happened between the two commits
-        versions = versions_between(info, dep["old-version"], dep["version"])
-        versions_updated += versions
+            # extract what's useful from info
+            versions = extract_from_info(info)
 
-        # fill dep_to_changes map
-        if dep["name"] not in dep_to_changes:
-            dep_to_changes[dep["name"]] = versions
-        # only update if that version change is larger
-        elif dep_to_changes[dep["name"]] < versions:
-            dep_to_changes[dep["name"]] = versions
-
-        # is it a MAJOR, MINOR, or PATCH change?
-        # TODO: if there are duplicates, it will be reflected here
-        # TODO: probably want to go through dep_to_changes at the end to calculate this
-        sem = what_kind_of_update(dep["old-version"], dep["version"])
-        if sem not in semver_versions_updated:
-            semver_versions_updated[sem] = 1
+            # create entry in deps
+            deps[name] = {
+                "all_versions": versions,
+                "old_version": dep["old-version"],
+                "new_version": dep["version"],
+            }
+        # make sure we keep the largest version change when a dependency has been updated several times
         else:
-            semver_versions_updated[sem] += 1
+            old_version = version.Version(deps[name]["old_version"])
+            new_version = version.Version(deps[name]["new_version"])
 
-        # get actual version changes during these dates
-        if dep["name"] not in dep_to_actual_changes:
-            num_changes = versions_in_daterange(
-                info, start_date, end_date)
-            dep_to_actual_changes[dep["name"]] = num_changes
-            actual_changes += num_changes
+            if version.Version(dep["old-version"]) < old_version:
+                print(
+                    f'debug: old {dep["old-version"]} < {old_version}')
+                deps[name]["old_version"] = dep["old-version"]
 
-        # get actual semver version updates in these dates
-        old, new = old_new_versions_in_daterange(info, start_date, end_date)
-        if old is not None and new is not None and old != new:
-            sem = what_kind_of_update(old, new)
-            if sem not in actual_semver_versions_updated:
-                actual_semver_versions_updated[sem] = 1
-            else:
-                actual_semver_versions_updated[sem] += 1
+            if version.Version(dep["version"]) > new_version:
+                print(
+                    f'debug: new {dep["version"]} > {new_version}')
+                deps[name]["new_version"] = dep["version"]
 
-    # print out
-    print(f"incremental version changes: {versions_updated}")
-    print(f"eventual version changes: {semver_versions_updated}")
+    # do the same with all the deps
+    for name in all_deps:
+        # get info from crates.io
+        info = get_crate_info(name)
 
-    biggest_offenders = sorted(
-        dep_to_changes, key=dep_to_changes.get, reverse=True)
-    print("biggest offenders:")
-    for offender in biggest_offenders[:20]:
-        print(
-            f"- {offender} has had {dep_to_changes[offender]} version changes")
+        # extract what's useful from info
+        versions = extract_from_info(info)
 
-    print(f"actual eventual version changes: {actual_semver_versions_updated}")
+        # update
+        all_deps[name]["all_versions"] = versions
 
-    print(f"actual incremental version changes: {actual_changes}")
-    actual_biggest_offenders = sorted(
-        dep_to_actual_changes, key=dep_to_actual_changes.get, reverse=True)
-    print("actual biggest offenders:")
-    for offender in actual_biggest_offenders[:20]:
-        print(
-            f"- {offender} has had {dep_to_actual_changes[offender]} version changes")
+    #
+    # 5. compute metrics
+    #
+
+    # note:
+    # landed = actually landed in the repo
+    # observed = published by crates during a time period
+
+    versions_landed = 0
+    semver_landed = defaultdict(int)
+
+    print("computing metrics...")
+    for dep in deps.values():
+        # 1. versions changes (v0.1.0 -> v0.1.2 counts for 2 versions)
+        versions_landed += get_versions_landed(dep)
+
+        # 2. MAJOR/MINOR/PATCH changes
+        sem = get_semver_type_update(dep)
+        semver_landed[sem] += 1
+
+    versions_observed = 0
+    semver_observed = defaultdict(int)
+
+    for dep in all_deps.values():
+        versions_observed += get_versions_observed(dep, start_date, end_date)
+        sem = get_semver_type_update_period(dep, start_date, end_date)
+        if sem is not None:
+            semver_observed[sem] += 1
+
+    #
+    # 6. print out results
+    #
+
+    print(f"{len(deps)} dependencies were updated on the repo")
+    print(f"{len(deps)} dependencies were updated in that time period")
+
+    print(f"versions_landed: {versions_landed}")
+    print(f"versions_observed: {versions_observed}")
+
+    print(f"semver_landed: {semver_landed}")
+    print(f"semver_observed: {semver_observed}")
 
 
 if __name__ == "__main__":
