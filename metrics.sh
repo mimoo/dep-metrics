@@ -13,7 +13,7 @@ git checkout $RELEASE1
 cargo x generate-summaries
 cp target/summaries/summary-release.toml ../release1.json
 
-cargo guppy select --kind ThirdParty > ../release1_deps
+cargo guppy select --kind ThirdParty > ../release1.deps
 
 # get stats on second release
 git checkout $RELEASE2
@@ -23,6 +23,10 @@ cp target/summaries/summary-release.toml ../release2.json
 # compare
 cd ../diem_latest
 cargo x diff-summary ../release1.json ../release2.json json > ../guppy_output.json
+
+# get all deps from latest release
+cargo guppy select --kind ThirdParty > ../release_latest.deps
+
 
 # save dates as well
 cd ../diem

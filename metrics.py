@@ -88,6 +88,24 @@ def what_kind_of_update(old: str, new: str) -> str:
     return "UNKNOWN"
 
 
+def dep_file_to_list(lines: str) -> dict:
+    deps = {}
+    for line in lines:
+        parsed = line.split(" ")
+        name = parsed[0]
+        versionn = parsed[1]
+        registry = parsed[2]
+
+        if registry.strip() != "(registry+https://github.com/rust-lang/crates.io-index)":
+            print(f"- not including in analysis: {line.strip()}")
+            continue
+
+        deps[name] = {
+            "version": versionn,
+        }
+    return deps
+
+
 def get_versions_observed(dep: dict, start_date, end_date) -> int:
     versions = 0
     for v in dep["all_versions"]:
@@ -148,9 +166,12 @@ def main():
     f2 = open("release2.datetime", "r")
     end_date = datetime.strptime(f2.read().strip(), '%Y-%m-%d %H:%M:%S %z')
 
-    # open
-    f3 = open("release1_deps", "r")
-    all_deps_file = f3.readlines()
+    # open dependency files
+    f3 = open("release1.deps", "r")
+    all_deps = dep_file_to_list(f3.readlines())
+
+    f4 = open("release_latest.deps", "r")
+    all_deps_latest = dep_file_to_list(f4.readlines())
 
     # open analyzed in our codebase during put (dep diff within the period)
     guppy_output_file = sys.argv[1]
@@ -171,25 +192,6 @@ def main():
         changed += guppy["host-packages"]["changed"]
 
     # TODO: how many dep introduced?
-
-    #
-    # 4. filter guppy output
-    #
-
-    all_deps = {}
-    for to_parse in all_deps_file:
-        parsed = to_parse.split(" ")
-        name = parsed[0]
-        versionn = parsed[1]
-        registry = parsed[2]
-
-        if registry.strip() != "(registry+https://github.com/rust-lang/crates.io-index)":
-            print(f"- not including in analysis: {to_parse.strip()}")
-            continue
-
-        all_deps[name] = {
-            "version": versionn,
-        }
 
     #
     # 5. filter and get info from crates.io
@@ -253,6 +255,17 @@ def main():
         # update
         all_deps[name]["all_versions"] = versions
 
+    # do the same with all the deps latest
+    for name in all_deps_latest:
+        # get info from crates.io
+        info = get_crate_info(name)
+
+        # extract what's useful from info
+        versions = extract_from_info(info)
+
+        # update
+        all_deps_latest[name]["all_versions"] = versions
+
     #
     # 5. compute metrics on landed changes
     #
@@ -283,6 +296,19 @@ def main():
             semver_observed[sem] += 1
 
     #
+    # 7. compute metrics on current situation
+    #
+
+    backlog = {}
+    backlog_semver = defaultdict(int)
+    for name in all_deps_latest:
+        sem = get_semver_type_update_period(
+            all_deps_latest[name], start_date, end_date)
+        if sem is not None:
+            backlog[name] = sem
+            backlog_semver[sem] += 1
+
+    #
     # 7. print out results
     #
 
@@ -291,10 +317,17 @@ def main():
     for sem in semver_landed:
         print(f"- {semver_landed[sem]} {sem} changes")
 
+    print()
+
     print(f"{len(all_deps)} dependencies were analyzed in our codebase during that time period, which published {versions_observed} new versions")
     print(f"Eventually, this can be summarized as")
     for sem in semver_observed:
         print(f"- {semver_observed[sem]} {sem} changes")
+
+    print()
+
+    print(f"the backlog of {len(backlog)} is {backlog}")
+    print(f"the summarized backlog: {backlog_semver}")
 
 
 if __name__ == "__main__":
