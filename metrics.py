@@ -12,9 +12,8 @@ import os
 # Crates.io
 #
 
+
 # obtain crate info
-
-
 def get_crate_info(crate: str) -> dict:
     # check if cache exists
     if os.path.exists("cache/" + crate):
@@ -35,6 +34,7 @@ def get_crate_info(crate: str) -> dict:
     return res
 
 
+# extract useful information from crates.io response
 def extract_from_info(info: dict) -> list:
     # get sorted list of ("semver", "date") tuples
     versions = []
@@ -253,12 +253,8 @@ def main():
         all_deps[name]["all_versions"] = versions
 
     #
-    # 5. compute metrics
+    # 5. compute metrics on landed changes
     #
-
-    # note:
-    # landed = actually landed in the repo
-    # observed = published by crates during a time period
 
     versions_landed = 0
     semver_landed = defaultdict(int)
@@ -272,6 +268,10 @@ def main():
         sem = get_semver_type_update(dep)
         semver_landed[sem] += 1
 
+    #
+    # 6. compute metrics on observed changes (published by crates, but not necessarily landed, in that period of time)
+    #
+
     versions_observed = 0
     semver_observed = defaultdict(int)
 
@@ -282,7 +282,7 @@ def main():
             semver_observed[sem] += 1
 
     #
-    # 6. print out results
+    # 7. print out results
     #
 
     print(f"{len(deps)} dependencies were updated on the repo")
