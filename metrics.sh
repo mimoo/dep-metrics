@@ -13,7 +13,7 @@ git checkout $RELEASE1
 cargo x generate-summaries
 cp target/summaries/summary-release.toml ../release1.json
 
-cargo guppy select > ../release1_deps
+cargo guppy select --kind ThirdParty > ../release1_deps
 
 # get stats on second release
 git checkout $RELEASE2

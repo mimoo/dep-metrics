@@ -152,7 +152,7 @@ def main():
     f3 = open("release1_deps", "r")
     all_deps_file = f3.readlines()
 
-    # open guppy output (dep diff within the period)
+    # open analyzed in our codebase during put (dep diff within the period)
     guppy_output_file = sys.argv[1]
     guppy_output = open(guppy_output_file, "r").read()
     guppy = json.loads(guppy_output)
@@ -184,6 +184,7 @@ def main():
         registry = parsed[2]
 
         if registry.strip() != "(registry+https://github.com/rust-lang/crates.io-index)":
+            print(f"- not including in analysis: {to_parse.strip()}")
             continue
 
         all_deps[name] = {
@@ -285,14 +286,15 @@ def main():
     # 7. print out results
     #
 
-    print(f"{len(deps)} dependencies were updated on the repo")
-    print(f"{len(deps)} dependencies were updated in that time period")
+    print(f"{len(deps)} dependencies were updated on the repo, jumping versions {versions_landed} increments higher.")
+    print("Eventually, this can be summarized as")
+    for sem in semver_landed:
+        print(f"- {semver_landed[sem]} {sem} changes")
 
-    print(f"versions_landed: {versions_landed}")
-    print(f"versions_observed: {versions_observed}")
-
-    print(f"semver_landed: {semver_landed}")
-    print(f"semver_observed: {semver_observed}")
+    print(f"{len(all_deps)} dependencies were analyzed in our codebase during that time period, which published {versions_observed} new versions")
+    print(f"Eventually, this can be summarized as")
+    for sem in semver_observed:
+        print(f"- {semver_observed[sem]} {sem} changes")
 
 
 if __name__ == "__main__":
